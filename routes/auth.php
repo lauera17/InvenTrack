@@ -9,7 +9,14 @@ use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\Auth\RegisteredUserController;
 use App\Http\Controllers\Auth\VerifyEmailController;
+use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
+
+/*
+|--------------------------------------------------------------------------
+| ROUTE PENGUNJUNG
+|--------------------------------------------------------------------------
+*/
 
 Route::middleware('guest')->group(function () {
     Route::get('register', [RegisteredUserController::class, 'create'])
@@ -35,7 +42,15 @@ Route::middleware('guest')->group(function () {
         ->name('password.store');
 });
 
+/*
+|--------------------------------------------------------------------------
+| ROUTE PENGGUNA YANG SUDAH LOGIN
+|--------------------------------------------------------------------------
+*/
+
 Route::middleware('auth')->group(function () {
+
+    // Verifikasi email
     Route::get('verify-email', EmailVerificationPromptController::class)
         ->name('verification.notice');
 
@@ -43,17 +58,51 @@ Route::middleware('auth')->group(function () {
         ->middleware(['signed', 'throttle:6,1'])
         ->name('verification.verify');
 
-    Route::post('email/verification-notification', [EmailVerificationNotificationController::class, 'store'])
+    Route::post('email/verification-notification', [
+        EmailVerificationNotificationController::class,
+        'store'
+    ])
         ->middleware('throttle:6,1')
         ->name('verification.send');
 
-    Route::get('confirm-password', [ConfirmablePasswordController::class, 'show'])
-        ->name('password.confirm');
+    // Konfirmasi password
+    Route::get('confirm-password', [
+        ConfirmablePasswordController::class,
+        'show'
+    ])->name('password.confirm');
 
-    Route::post('confirm-password', [ConfirmablePasswordController::class, 'store']);
+    Route::post('confirm-password', [
+        ConfirmablePasswordController::class,
+        'store'
+    ]);
 
-    Route::put('password', [PasswordController::class, 'update'])->name('password.update');
+    // Ubah password
+    Route::put('password', [PasswordController::class, 'update'])
+        ->name('password.update');
 
+    /*
+    |--------------------------------------------------------------------------
+    | PROFIL PENGGUNA
+    |--------------------------------------------------------------------------
+    */
+
+    // Menampilkan halaman profil
+    Route::get('/profile', [ProfileController::class, 'edit'])
+        ->name('profile.edit');
+
+    // Memperbarui data profil
+    Route::patch('/profile', [ProfileController::class, 'update'])
+        ->name('profile.update');
+
+    // Memperbarui foto profil
+    Route::post('/profile/photo', [ProfileController::class, 'updatePhoto'])
+        ->name('profile.photo.update');
+
+    // Menghapus akun
+    Route::delete('/profile', [ProfileController::class, 'destroy'])
+        ->name('profile.destroy');
+
+    // Logout
     Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');
 });

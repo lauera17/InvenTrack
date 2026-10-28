@@ -3,200 +3,227 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Item;
 use App\Models\Loan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class LoanController extends Controller
 {
+    /**
+     * Menampilkan daftar seluruh peminjaman untuk Admin.
+     */
     public function index(Request $request)
     {
-        $loans = Loan::with(['user', 'items.item'])
-            ->when($request->filled('status'), fn ($q) =>
-                $q->where('status', $request->status)
-            )
-            ->when($request->filled('search'), function ($q) use ($request) {
-                $search = $request->search;
+        $query = Loan::with(['user', 'items'])
+            ->latest();
 
-                $q->whereHas('user', fn ($u) =>
-                    $u->where('name', 'like', "%{$search}%")
-                      ->orWhere('email', 'like', "%{$search}%")
-                );
-            })
-            ->latest()
-            ->paginate(10)
-            ->withQueryString();
+        if ($request->filled('status')) {
+            $query->where('status', $request->input('status'));
+        }
+
+        if ($request->filled('search')) {
+            $search = trim($request->input('search'));
+
+            $query->where(function ($q) use ($search) {
+                $q->where('loan_code', 'like', "%{$search}%")
+                    ->orWhere('purpose', 'like', "%{$search}%")
+                    ->orWhere('reason', 'like', "%{$search}%")
+                    ->orWhereHas('user', function ($userQuery) use ($search) {
+                        $userQuery->where('name', 'like', "%{$search}%");
+                    });
+            });
+        }
+
+        $loans = $query->paginate(10)->withQueryString();
 
         return view('admin.loans.index', compact('loans'));
     }
 
+    /**
+     * Menampilkan detail peminjaman.
+     */
     public function show(Loan $loan)
     {
-        $loan->load(['user', 'items.item', 'approver', 'returnApprover']);
+        $loan->load(['user', 'items', 'returnDocuments']);
 
         return view('admin.loans.show', compact('loan'));
     }
 
-    public function approve(Loan $loan)
-    {
-        $approved = DB::transaction(function () use ($loan) {
-            $locked = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
-
-            if ($locked->status !== 'pending') {
-                return false;
-            }
-
-            $locked->update([
-                'status' => 'approved',
-                'approved_by' => auth()->id(),
-                'qr_token' => Str::random(48),
-            ]);
-
-            return true;
-        });
-
-        if (!$approved) {
-            return back()->with('error', 'Pengajuan sudah diproses atau statusnya berubah.');
-        }
-
-        return redirect()->route('admin.loans.show', $loan)
-            ->with('success', 'Pengajuan disetujui. QR pengambilan sudah tersedia.');
-    }
-
-    public function reject(Request $request, Loan $loan)
-    {
-        $request->validate([
-            'rejection_note' => ['required', 'string', 'max:1000'],
-        ]);
-
-        $rejected = DB::transaction(function () use ($loan, $request) {
-            $locked = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
-
-            if ($locked->status !== 'pending') {
-                return false;
-            }
-
-            $locked->update([
-                'status' => 'rejected',
-                'purpose' => $locked->purpose
-                    . "\n\nAlasan penolakan: "
-                    . $request->rejection_note,
-            ]);
-
-            return true;
-        });
-
-        if (!$rejected) {
-            return back()->with('error', 'Pengajuan sudah diproses.');
-        }
-
-        return redirect()->route('admin.loans.index')
-            ->with('success', 'Pengajuan berhasil ditolak.');
-    }
-
+    /**
+     * Menampilkan formulir pemindaian QR.
+     */
     public function scanForm()
     {
         return view('admin.loans.scan');
     }
 
+    /**
+     * Menyetujui pengajuan peminjaman.
+     *
+     * Stok belum dikurangi pada tahap persetujuan.
+     * Stok dikurangi ketika barang benar-benar diserahkan.
+     */
+    public function approve(Loan $loan)
+    {
+        DB::transaction(function () use ($loan) {
+            $lockedLoan = Loan::whereKey($loan->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($lockedLoan->status !== 'pending') {
+                throw ValidationException::withMessages([
+                    'loan' => 'Hanya pengajuan berstatus pending yang dapat disetujui.',
+                ]);
+            }
+
+            $lockedLoan->update([
+                'status' => 'approved',
+            ]);
+        });
+
+        return redirect()
+            ->route('admin.loans.show', $loan)
+            ->with('success', 'Pengajuan peminjaman berhasil disetujui.');
+    }
+
+    /**
+     * Menolak pengajuan yang belum diserahkan kepada peminjam.
+     */
+    public function reject(Loan $loan)
+    {
+        DB::transaction(function () use ($loan) {
+            $lockedLoan = Loan::whereKey($loan->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if (!in_array($lockedLoan->status, ['pending', 'approved'], true)) {
+                throw ValidationException::withMessages([
+                    'loan' => 'Pengajuan ini tidak dapat ditolak pada status sekarang.',
+                ]);
+            }
+
+            $lockedLoan->update([
+                'status' => 'rejected',
+            ]);
+        });
+
+        return redirect()
+            ->route('admin.loans.index')
+            ->with('success', 'Pengajuan peminjaman berhasil ditolak.');
+    }
+
+    /**
+     * Memproses QR saat barang diserahkan kepada pegawai.
+     *
+     * QR berisi token acak, bukan ID peminjaman.
+     */
     public function handover(Request $request)
     {
         $data = $request->validate([
-            'token' => ['required', 'string', 'size:48'],
+            'qr_token' => ['required', 'string', 'max:255'],
         ]);
 
-        $loanId = Loan::where('qr_token', $data['token'])
-            ->value('id');
+        $loan = DB::transaction(function () use ($data) {
+            $lockedLoan = Loan::where('qr_token', $data['qr_token'])
+                ->lockForUpdate()
+                ->first();
 
-        if (!$loanId) {
-            return back()->with('error', 'QR Code tidak valid.');
-        }
-
-        $result = DB::transaction(function () use ($loanId, $data) {
-            $loan = Loan::whereKey($loanId)->lockForUpdate()->firstOrFail();
-
-            if (
-                $loan->status !== 'approved' ||
-                !hash_equals((string) $loan->qr_token, $data['token'])
-            ) {
-                return false;
+            if (!$lockedLoan) {
+                throw ValidationException::withMessages([
+                    'qr_token' => 'QR tidak valid atau peminjaman tidak ditemukan.',
+                ]);
             }
 
-            $lines = $loan->items()
-                ->with('item')
-                ->orderBy('item_id')
+            if ($lockedLoan->status !== 'approved') {
+                throw ValidationException::withMessages([
+                    'qr_token' => 'Peminjaman harus disetujui sebelum barang diserahkan.',
+                ]);
+            }
+
+            $loanItems = $lockedLoan->items()
+                ->orderBy('items.id')
+                ->lockForUpdate()
                 ->get();
 
-            foreach ($lines as $line) {
-                $item = \App\Models\Item::whereKey($line->item_id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
+            if ($loanItems->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'qr_token' => 'Peminjaman ini belum memiliki barang.',
+                ]);
+            }
 
-                if ($item->condition !== 'baik' || $item->stock < $line->quantity) {
-                    throw new \RuntimeException(
-                        "Stok {$item->name} tidak lagi mencukupi."
-                    );
+            foreach ($loanItems as $item) {
+                $quantity = (int) $item->pivot->quantity;
+
+                if (
+                    (int) $item->stock < $quantity ||
+                    strtolower(trim((string) $item->condition)) !== 'baik'
+                ) {
+                    throw ValidationException::withMessages([
+                        'qr_token' => 'Stok atau kondisi salah satu barang tidak memenuhi syarat.',
+                    ]);
                 }
             }
 
-            foreach ($lines as $line) {
-                $item = \App\Models\Item::whereKey($line->item_id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
+            foreach ($loanItems as $item) {
+                $quantity = (int) $item->pivot->quantity;
 
-                $item->decrement('stock', $line->quantity);
+                Item::whereKey($item->id)->decrement('stock', $quantity);
             }
 
-            $loan->update([
+            $lockedLoan->update([
                 'status' => 'borrowed',
-                'handed_over_at' => now(),
-                'qr_token' => null,
             ]);
 
-            return true;
+            return $lockedLoan;
         });
 
-        if (!$result) {
-            return back()->with('error', 'QR sudah digunakan atau peminjaman tidak siap diserahkan.');
-        }
-
-        return redirect()->route('admin.loans.show', $loanId)
-            ->with('success', 'Penyerahan barang berhasil dikonfirmasi.');
+        return redirect()
+            ->route('admin.loans.show', $loan)
+            ->with('success', 'QR berhasil diverifikasi. Barang telah dicatat sebagai dipinjam.');
     }
 
+    /**
+     * Menyetujui pengembalian dan mengembalikan stok barang.
+     */
     public function approveReturn(Loan $loan)
     {
-        $approved = DB::transaction(function () use ($loan) {
-            $locked = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
+        DB::transaction(function () use ($loan) {
+            $lockedLoan = Loan::whereKey($loan->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-            if ($locked->status !== 'return_requested') {
-                return false;
+            if ($lockedLoan->status !== 'return_requested') {
+                throw ValidationException::withMessages([
+                    'loan' => 'Hanya pengembalian yang menunggu pemeriksaan yang dapat disetujui.',
+                ]);
             }
 
-            $lines = $locked->items()->orderBy('item_id')->get();
+            $loanItems = $lockedLoan->items()
+                ->orderBy('items.id')
+                ->lockForUpdate()
+                ->get();
 
-            foreach ($lines as $line) {
-                $item = \App\Models\Item::whereKey($line->item_id)
-                    ->lockForUpdate()
-                    ->firstOrFail();
-
-                $item->increment('stock', $line->quantity);
+            if ($loanItems->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'loan' => 'Data barang pada peminjaman ini tidak ditemukan.',
+                ]);
             }
 
-            $locked->update([
+            foreach ($loanItems as $item) {
+                $quantity = (int) $item->pivot->quantity;
+
+                Item::whereKey($item->id)->increment('stock', $quantity);
+            }
+
+            $lockedLoan->update([
                 'status' => 'returned',
-                'returned_at' => now(),
-                'return_approved_by' => auth()->id(),
             ]);
-
-            return true;
         });
 
-        if (!$approved) {
-            return back()->with('error', 'Pengembalian sudah diproses.');
-        }
-
-        return back()->with('success', 'Pengembalian disetujui dan stok diperbarui.');
+        return redirect()
+            ->route('admin.loans.show', $loan)
+            ->with('success', 'Pengembalian disetujui dan stok barang telah diperbarui.');
     }
 }

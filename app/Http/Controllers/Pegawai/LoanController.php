@@ -5,14 +5,18 @@ namespace App\Http\Controllers\Pegawai;
 use App\Http\Controllers\Controller;
 use App\Models\Item;
 use App\Models\Loan;
+use App\Models\LoanItem;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class LoanController extends Controller
 {
     public function index(Request $request)
     {
-        $loans = Loan::with('items.item')
+        $loans = Loan::with(['items', 'returnDocuments'])
             ->where('user_id', $request->user()->id)
             ->latest()
             ->paginate(10);
@@ -24,7 +28,7 @@ class LoanController extends Controller
     {
         $items = Item::with('category')
             ->where('stock', '>', 0)
-            ->where('condition', 'baik')
+            ->where('condition', 'Baik')
             ->orderBy('name')
             ->get();
 
@@ -36,18 +40,23 @@ class LoanController extends Controller
         $data = $request->validate([
             'purpose' => ['required', 'string', 'max:2000'],
             'items' => ['required', 'array', 'min:1'],
-            'items.*.id' => ['required', 'integer', 'distinct', 'exists:items,id'],
-            'items.*.quantity' => ['required', 'integer', 'min:1', 'max:1000'],
+            'items.*.id' => [
+                'required',
+                'integer',
+                'distinct',
+                'exists:items,id',
+            ],
+            'items.*.quantity' => [
+                'required',
+                'integer',
+                'min:1',
+                'max:1000',
+            ],
         ]);
 
         $loan = DB::transaction(function () use ($request, $data) {
-            $loan = Loan::create([
-                'user_id' => $request->user()->id,
-                'purpose' => $data['purpose'],
-                'status' => 'pending',
-            ]);
-
-            $requested = collect($data['items'])->keyBy('id');
+            $requested = collect($data['items'])
+                ->keyBy(fn ($line) => (int) $line['id']);
 
             $items = Item::whereIn('id', $requested->keys())
                 ->orderBy('id')
@@ -56,82 +65,172 @@ class LoanController extends Controller
                 ->keyBy('id');
 
             if ($items->count() !== $requested->count()) {
-                abort(422, 'Ada barang yang tidak ditemukan.');
+                throw ValidationException::withMessages([
+                    'items' => 'Ada barang yang tidak ditemukan.',
+                ]);
             }
 
             foreach ($requested as $itemId => $line) {
                 $item = $items->get($itemId);
                 $quantity = (int) $line['quantity'];
 
-                if ($item->condition !== 'baik' || $item->stock < $quantity) {
-                    abort(422, "Stok {$item->name} tidak mencukupi.");
+                if (
+                    !$item ||
+                    strtolower(trim((string) $item->condition)) !== 'baik' ||
+                    (int) $item->stock < $quantity
+                ) {
+                    throw ValidationException::withMessages([
+                        'items' => 'Stok atau kondisi barang tidak memenuhi syarat.',
+                    ]);
                 }
+            }
 
-                $loan->items()->create([
-                    'item_id' => $item->id,
-                    'quantity' => $quantity,
+            do {
+                $loanCode = 'LOAN-' .
+                    now()->format('Ymd') . '-' .
+                    Str::upper(Str::random(5));
+            } while (Loan::where('loan_code', $loanCode)->exists());
+
+            $loan = Loan::create([
+                'loan_code' => $loanCode,
+                'user_id' => $request->user()->id,
+                'purpose' => $data['purpose'],
+                'reason' => $data['purpose'],
+                'status' => 'pending',
+                'qr_token' => Str::random(64),
+            ]);
+
+            foreach ($requested as $itemId => $line) {
+                LoanItem::create([
+                    'loan_id' => $loan->id,
+                    'item_id' => (int) $itemId,
+                    'quantity' => (int) $line['quantity'],
                 ]);
             }
 
             return $loan;
         });
 
-        return redirect()->route('pegawai.loans.show', $loan)
+        return redirect()
+            ->route('pegawai.loans.show', $loan)
             ->with('success', 'Pengajuan peminjaman berhasil dikirim.');
     }
 
     public function show(Request $request, Loan $loan)
     {
-        abort_unless($loan->user_id === $request->user()->id, 403);
+        abort_unless(
+            (int) $loan->user_id === (int) $request->user()->id,
+            403
+        );
 
-        $loan->load('items.item');
+        // Buat token untuk transaksi lama yang belum memiliki token,
+        // tetapi hanya setelah pengajuan disetujui atau saat dipinjam.
+        if (
+            in_array($loan->status, ['approved', 'borrowed'], true) &&
+            empty($loan->qr_token)
+        ) {
+            $loan->qr_token = Str::random(64);
+            $loan->save();
+        }
+
+        $loan->load([
+            'user',
+            'items',
+            'returnDocuments',
+        ]);
 
         return view('pegawai.loans.show', compact('loan'));
     }
 
     public function returnForm(Request $request, Loan $loan)
     {
-        abort_unless($loan->user_id === $request->user()->id, 403);
-        abort_unless($loan->status === 'borrowed', 403);
+        abort_unless(
+            (int) $loan->user_id === (int) $request->user()->id,
+            403
+        );
+
+        if ($loan->status !== 'borrowed') {
+            return redirect()
+                ->route('pegawai.loans.show', $loan)
+                ->with('error', 'Barang belum dapat dikembalikan.');
+        }
+
+        $loan->load('items');
 
         return view('pegawai.loans.return', compact('loan'));
     }
 
     public function submitReturn(Request $request, Loan $loan)
     {
-        abort_unless($loan->user_id === $request->user()->id, 403);
+        abort_unless(
+            (int) $loan->user_id === (int) $request->user()->id,
+            403
+        );
+
+        if ($loan->status !== 'borrowed') {
+            return back()->with(
+                'error',
+                'Peminjaman ini belum dapat diajukan untuk pengembalian.'
+            );
+        }
 
         $data = $request->validate([
             'return_note' => ['required', 'string', 'max:2000'],
-            'return_photo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+            'return_photo' => [
+                'required',
+                'image',
+                'mimes:jpg,jpeg,png,webp',
+                'max:5120',
+            ],
         ]);
 
-        $path = $data['return_photo']->store('returns', 'public');
+        // Simpan foto ke storage/app/public/returns.
+        $path = $request->file('return_photo')
+            ->store('returns', 'public');
 
-        $updated = DB::transaction(function () use ($loan, $request, $data, $path) {
-            $locked = Loan::whereKey($loan->id)->lockForUpdate()->firstOrFail();
-
-            if (
-                $locked->user_id !== $request->user()->id ||
-                $locked->status !== 'borrowed'
+        try {
+            DB::transaction(function () use (
+                $loan,
+                $request,
+                $data,
+                $path
             ) {
-                return false;
-            }
+                $locked = Loan::whereKey($loan->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
-            $locked->update([
-                'return_note' => $data['return_note'],
-                'return_photo' => $path,
-                'status' => 'return_requested',
-            ]);
+                if (
+                    (int) $locked->user_id !== (int) $request->user()->id ||
+                    $locked->status !== 'borrowed'
+                ) {
+                    throw ValidationException::withMessages([
+                        'return_note' => 'Status peminjaman sudah berubah. Muat ulang halaman.',
+                    ]);
+                }
 
-            return true;
-        });
-
-        if (!$updated) {
-            return back()->with('error', 'Status peminjaman sudah berubah. Muat ulang halaman.');
+                /*
+                 * BAGIAN INI MENGASUMSIKAN kolom return_note dan
+                 * return_photo berada di tabel loans.
+                 * Jika proyekmu menyimpan pengembalian pada tabel
+                 * return_documents, bagian ini harus disesuaikan
+                 * dengan struktur tabel dan model ReturnDocument.
+                 */
+                $locked->update([
+                    'return_note' => $data['return_note'],
+                    'return_photo' => $path,
+                    'status' => 'return_requested',
+                ]);
+            });
+        } catch (\Throwable $exception) {
+            Storage::disk('public')->delete($path);
+            throw $exception;
         }
 
-        return redirect()->route('pegawai.loans.show', $loan)
-            ->with('success', 'Pengembalian diajukan. Tunggu pemeriksaan Admin.');
+        return redirect()
+            ->route('pegawai.loans.show', $loan)
+            ->with(
+                'success',
+                'Pengajuan pengembalian berhasil dikirim. Tunggu pemeriksaan Admin.'
+            );
     }
 }

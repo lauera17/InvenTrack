@@ -12,34 +12,50 @@ use Barryvdh\DomPDF\Facade\Pdf;
 class ReportController extends Controller
 {
     /**
-     * Query laporan berdasarkan filter.
+     * Query laporan berdasarkan filter tanggal dan status.
      */
     private function query(Request $request)
     {
         $filters = $request->validate([
             'start_date' => ['nullable', 'date'],
-            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+            'end_date' => [
+                'nullable',
+                'date',
+                'after_or_equal:start_date',
+            ],
             'status' => [
                 'nullable',
-                'in:pending,approved,borrowed,return_requested,returned,rejected'
+                'in:pending,approved,borrowed,return_requested,returned,rejected',
             ],
         ]);
 
-        return Loan::with(['user', 'items.item'])
-            ->when($filters['start_date'] ?? null, function ($query, $date) {
-                $query->whereDate('created_at', '>=', $date);
-            })
-            ->when($filters['end_date'] ?? null, function ($query, $date) {
-                $query->whereDate('created_at', '<=', $date);
-            })
-            ->when($filters['status'] ?? null, function ($query, $status) {
-                $query->where('status', $status);
-            })
+        return Loan::with([
+            'user',
+            'items',
+        ])
+            ->when(
+                $filters['start_date'] ?? null,
+                function ($query, $date) {
+                    $query->whereDate('created_at', '>=', $date);
+                }
+            )
+            ->when(
+                $filters['end_date'] ?? null,
+                function ($query, $date) {
+                    $query->whereDate('created_at', '<=', $date);
+                }
+            )
+            ->when(
+                $filters['status'] ?? null,
+                function ($query, $status) {
+                    $query->where('status', $status);
+                }
+            )
             ->latest();
     }
 
     /**
-     * Menampilkan halaman laporan.
+     * Menampilkan halaman laporan admin.
      */
     public function index(Request $request)
     {
@@ -51,31 +67,37 @@ class ReportController extends Controller
     }
 
     /**
-     * Mengunduh laporan Excel.
+     * Mengunduh laporan dalam format Excel.
      */
     public function excel(Request $request)
     {
+        $filters = $request->validate([
+            'start_date' => ['nullable', 'date'],
+            'end_date' => [
+                'nullable',
+                'date',
+                'after_or_equal:start_date',
+            ],
+            'status' => [
+                'nullable',
+                'in:pending,approved,borrowed,return_requested,returned,rejected',
+            ],
+        ]);
+
         return Excel::download(
-            new LoansExport(
-                $request->validate([
-                    'start_date' => ['nullable', 'date'],
-                    'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
-                    'status' => [
-                        'nullable',
-                        'in:pending,approved,borrowed,return_requested,returned,rejected'
-                    ],
-                ])
-            ),
+            new LoansExport($filters),
             'laporan-inventrack.xlsx'
         );
     }
 
     /**
-     * Mengunduh laporan PDF.
+     * Mengunduh laporan dalam format PDF.
      */
     public function pdf(Request $request)
     {
-        $loans = $this->query($request)->limit(10000)->get();
+        $loans = $this->query($request)
+            ->limit(10000)
+            ->get();
 
         $pdf = Pdf::loadView(
             'admin.reports.pdf',

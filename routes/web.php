@@ -27,7 +27,12 @@ Route::get('/', function () {
 
 Route::middleware(['auth'])->group(function () {
 
-    // Dashboard Admin dan Pegawai
+    /*
+    |--------------------------------------------------------------------------
+    | DASHBOARD ADMIN DAN PEGAWAI
+    |--------------------------------------------------------------------------
+    */
+
     Route::get('/dashboard', DashboardController::class)
         ->name('dashboard');
 
@@ -42,44 +47,55 @@ Route::middleware(['auth'])->group(function () {
         ->name('admin.')
         ->group(function () {
 
-            // CRUD Data Barang
-            Route::resource('items', ItemController::class)
-                ->except(['show']);
+            /*
+            |--------------------------------------------------------------------------
+            | CRUD DATA BARANG
+            |--------------------------------------------------------------------------
+            |
+            | Route show diaktifkan agar tombol Detail bisa digunakan.
+            | ItemController harus memiliki method show().
+            |
+            */
 
-            // Daftar Peminjaman
+            Route::resource('items', ItemController::class);
+
+            /*
+            |--------------------------------------------------------------------------
+            | PEMINJAMAN
+            |--------------------------------------------------------------------------
+            */
+
             Route::get('/loans', [AdminLoanController::class, 'index'])
                 ->name('loans.index');
 
-            // Daftar Pengembalian Barang
-            // Sementara menggunakan halaman daftar peminjaman
             Route::get('/returns', [AdminLoanController::class, 'index'])
                 ->name('returns.index');
 
-            // Halaman Pemindaian QR
+            // Halaman pemindaian QR
             Route::get('/loans/scan', [AdminLoanController::class, 'scanForm'])
                 ->name('loans.scan');
 
-            // Konfirmasi Penyerahan Barang melalui QR
+            // Konfirmasi penyerahan barang melalui QR
             Route::post('/loans/handover', [AdminLoanController::class, 'handover'])
                 ->name('loans.handover');
 
-            // Detail Peminjaman
-            Route::get('/loans/{loan}', [AdminLoanController::class, 'show'])
-                ->name('loans.show');
-
-            // Setujui Peminjaman
+            // Setujui peminjaman
             Route::post('/loans/{loan}/approve', [AdminLoanController::class, 'approve'])
                 ->name('loans.approve');
 
-            // Tolak Peminjaman
+            // Tolak peminjaman
             Route::post('/loans/{loan}/reject', [AdminLoanController::class, 'reject'])
                 ->name('loans.reject');
 
-            // Setujui Pengembalian
+            // Setujui pengembalian
             Route::post(
                 '/loans/{loan}/approve-return',
                 [AdminLoanController::class, 'approveReturn']
             )->name('loans.approve-return');
+
+            // Detail peminjaman
+            Route::get('/loans/{loan}', [AdminLoanController::class, 'show'])
+                ->name('loans.show');
 
             /*
             |--------------------------------------------------------------------------
@@ -87,15 +103,12 @@ Route::middleware(['auth'])->group(function () {
             |--------------------------------------------------------------------------
             */
 
-            // Halaman laporan
             Route::get('/reports', [ReportController::class, 'index'])
                 ->name('reports.index');
 
-            // Export laporan Excel
             Route::get('/reports/excel', [ReportController::class, 'excel'])
                 ->name('reports.excel');
 
-            // Export laporan PDF
             Route::get('/reports/pdf', [ReportController::class, 'pdf'])
                 ->name('reports.pdf');
         });
@@ -111,7 +124,7 @@ Route::middleware(['auth'])->group(function () {
         ->name('pegawai.')
         ->group(function () {
 
-            // Lihat Stok Barang
+            // Lihat stok barang
             Route::get('/items', function () {
                 $items = Item::with('category')
                     ->orderBy('name')
@@ -120,29 +133,33 @@ Route::middleware(['auth'])->group(function () {
                 return view('pegawai.items.index', compact('items'));
             })->name('items.index');
 
-            // Riwayat Peminjaman
+            // Riwayat peminjaman
             Route::get('/loans', [PegawaiLoanController::class, 'index'])
                 ->name('loans.index');
 
-            // Form Pengajuan Peminjaman
+            // Form pengajuan peminjaman
             Route::get('/loans/create', [PegawaiLoanController::class, 'create'])
                 ->name('loans.create');
 
-            // Simpan Pengajuan Peminjaman
+            // Simpan pengajuan peminjaman
             Route::post('/loans', [PegawaiLoanController::class, 'store'])
                 ->name('loans.store');
 
-            // Detail Peminjaman Pegawai
+            // Form pengembalian
+            Route::get(
+                '/loans/{loan}/return',
+                [PegawaiLoanController::class, 'returnForm']
+            )->name('loans.return.form');
+
+            // Kirim pengajuan pengembalian
+            Route::post(
+                '/loans/{loan}/return',
+                [PegawaiLoanController::class, 'submitReturn']
+            )->name('loans.return.submit');
+
+            // Detail peminjaman pegawai
             Route::get('/loans/{loan}', [PegawaiLoanController::class, 'show'])
                 ->name('loans.show');
-
-            // Form Pengembalian
-            Route::get('/loans/{loan}/return', [PegawaiLoanController::class, 'returnForm'])
-                ->name('loans.return.form');
-
-            // Kirim Pengajuan Pengembalian
-            Route::post('/loans/{loan}/return', [PegawaiLoanController::class, 'submitReturn'])
-                ->name('loans.return.submit');
         });
 });
 

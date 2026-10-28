@@ -2,38 +2,40 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Item extends Model
 {
+    use HasFactory;
+
     protected $fillable = [
         'category_id',
-        'code',
         'name',
+        'code',
         'description',
-        'location',
         'stock',
-        'minimum_stock',
         'condition',
+        'image',
     ];
 
-    protected function casts(): array
-    {
-        return [
-            'stock' => 'integer',
-            'minimum_stock' => 'integer',
-        ];
-    }
-
+    /**
+     * Kategori milik barang.
+     */
     public function category(): BelongsTo
     {
         return $this->belongsTo(Category::class);
     }
 
-    public function loanItems(): HasMany
+    /**
+     * Semua transaksi peminjaman yang menggunakan barang ini.
+     */
+    public function loans(): BelongsToMany
     {
-        return $this->hasMany(LoanItem::class);
+        return $this->belongsToMany(Loan::class, 'loan_items')
+            ->withPivot('quantity')
+            ->withTimestamps();
     }
 }
